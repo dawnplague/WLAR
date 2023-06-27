@@ -1,0 +1,622 @@
+##First using ppi analysis on sequencing data-mining data and guarantee potential genes
+##Then read the potential genes and marker genes
+setwd("D:/github_upload")        ##change inputting directory here
+#setwd("D:/Prostate_Tumor_2020/PC_normal")
+
+library(stringr)
+library(data.table)
+library(dplyr)
+   ##inputted files should be under the format with the first column labels and other columns expressions for samples, making sure repeated genes were averaged or summed
+   ##Merged files for different sources were also okay
+   ##Transcriptome data -- change first column into gene symbol, can be normalized or not normalized, and expression in counts, FPKM, TPM etc. were fine
+   ##Single cell transcriptome data -- using Seurat etc. to convert into clusters and using expression of clusters to replace samples
+   ##Methylome data --reading methylation beta value files were okay
+FILE<-"TCGA-PRAD_processed.csv"   ##for transcriptome data for single source
+#FILE<-""   ##for merged transcriptome data  for multi sources, for instance, GEO data
+#FILE<-""   ##for single cell transcriptome data
+#FILE<-""   ##for beta methylation level for methylome data
+#FILE<-""   ##for proteomics data 
+#FILE<-"Data_normalized.csv"
+f<-fread(FILE,check.names=TRUE)
+nms <- colnames(f)
+s=f[,rowSums(.SD,na.rm=TRUE),.SDcols=nms[-1]]
+f <- f[s>500,]
+nms <- names(f)
+s <- f[,lapply(.SD,function(x) sum(x>0)),.SDcols=nms[-1]] %>% as.numeric
+n <- nrow(f)
+nm1<-nms[s<2]
+if (length(nm1)>0) f[,(nm1):=NULL]
+FILEOUT0<-strsplit(FILE,split="_")[[1]][1]
+FILEOUT1<-paste(FILEOUT0,"_filtered.csv",sep="")
+FILEOUT2<-paste(FILEOUT0,"_rules.csv",sep="")
+fwrite(f,FILEOUT1,row.names=FALSE)
+
+##converting numeric data into discrete data
+library(data.table)
+library(data.table)
+library(dplyr)
+library(Matrix)
+f<-fread(FILEOUT1,check.names=TRUE)
+rns <- f[,Gene]
+f[,Gene:=NULL]
+nms <- names(f)
+f[,(nms):=lapply(.SD,function(x) {x1 <- quantile(x,probs= c(0.25,0.5,0.75))
+                                y <- rep(0,length(x))
+                                y[x>x1[3]] <- 3
+                                y[x<=x1[3]&x>x1[2]] <- 2
+                                y[x<=x1[2]&x>x1[1]] <- 1  
+                                y}),.SDcols=nms]
+
+f1 <- f
+f1[!f1==3] <- 0                                
+
+f <- as.matrix(f)
+f <- as(f,"sparseMatrix")
+
+f1 <- as.matrix(f1)
+f1 <- as(f1,"sparseMatrix")
+
+v1 <- f
+v1[!v1==1] <- 0
+v1 <-  tcrossprod(v1)
+
+v2 <- f
+v2[!v2==2] <- 0
+v2[v2==2] <- 1
+v2 <-  tcrossprod(v2)
+
+v3 <- f
+v3[!v3==3] <- 0
+v3[v3==3] <- 1
+v3 <- tcrossprod(v3)
+
+v <- v1+v2+v3
+
+v11 <- f1
+v11[!v11==1] <- 0
+v11 <-  tcrossprod(v11)
+
+v21 <- f1
+v21[!v21==2] <- 0
+v21[v21==2] <- 1
+v21 <-  tcrossprod(v21)
+
+v31 <- f1
+v31[!v31==3] <- 0
+v31[v31==3] <- 1
+v31 <- tcrossprod(v31)
+
+v <- v1+v2+v3
+v1 <- v11+v21+v31
+
+l <- ncol(f)
+
+term_xy <- v
+term_x <- Matrix(diag(v),nrow=nrow(v),ncol=ncol(v),byrow=FALSE,sparse=T)
+term_xy[term_xy==0] <- 1e-6
+term_x[term_x==0] <- 1e-6
+xy <- as.data.table(summary(term_xy))
+x <- as.data.table(summary(term_x))
+xy[,xy:=x]
+xy[,x:=NULL]
+res <- merge(xy,x,by=c("i","j"))
+
+term_xy1 <- v1
+term_x1 <- Matrix(diag(v1),nrow=nrow(v1),ncol=ncol(v1),byrow=FALSE,sparse=T)
+term_xy[term_xy1==0] <- 1e-6
+term_x[term_x1==0] <- 1e-6
+xy1 <- as.data.table(summary(term_xy1))
+x1 <- as.data.table(summary(term_x1))
+xy1[,xy1:=x]
+xy1[,x:=NULL]
+x1[,x1:=x]
+x1[,x:=NULL]
+res1 <- merge(xy1,x1,by=c("i","j"))
+
+res2 <- merge(res,res1,by=c("i","j"))
+res2[,from:=rns[i]]
+res2[,to:=rns[j]]
+res2[,rule3:=0]
+res2[,rule4:=0]
+res2[x1>0.1*l&xy1>0.1*l,rule3:=xy1/x1]
+res2[,rule4:=xy1+x1]
+res2[x>0.1*l&xy>0.1*l,rule3:=xy/x+rule3]
+res2[,rule4:=xy+x+rule4]
+res_filter<-res2
+resi<-res_filter[,i]
+resj<-res_filter[,j]
+res_filter2<-res_filter[which(resi!=resj),]
+res_filter2<-res_filter2[,7:10]
+colnames(res_filter2)[3:4]<-c("Confidence","Support")
+fwrite(res_filter2,FILEOUT2,row.names=FALSE)
+
+   ##Adding rules for different sources
+aa<-list.files()
+aa2<-aa[which(str_detect(aa,"_rules.csv"))]
+lena<-length(aa2)
+bulkfile<-list()
+bulkfile[lena]<-0
+rows<-""
+for (i in 1:lena){
+    bulkfile[[i]]<-fread(aa2[i])
+    bulkfile[[i]]<-as.matrix(bulkfile[[i]])
+    rule1<-bulkfile[[i]][,1]
+    rule2<-bulkfile[[i]][,2]
+    kk<-paste(rule1,rule2,sep=";")
+    rownames(bulkfile[[i]])<-kk
+    rows<-union(rows,kk)
+     }
+rows<-rows[which(rows!="")]
+lens<-length(rows)
+bulkfile2<-list()
+bulkfile2[lena]<-0
+for (i in 1:lena){
+    bb0<-matrix(0,lens,5)
+    rownames(bb0)<-rows
+    colnames(bb0)<-colnames(bulkfile[[1]])
+    rowa<-rownames(bulkfile[[i]])
+    bb0[rowa,]<-bulkfile[[i]][rowa,]
+    bulkfile2[[i]]<-bb0    
+   }
+filebase30<-bulkfile2[[1]]
+for (i in 2:lena){
+   filebase30[,3]<-as.numeric(filebase30[,3])+as.numeric(bulkfile2[[i]][,3])
+   filebase30[,4]<-as.numeric(filebase30[,4])+as.numeric(bulkfile2[[i]][,4])
+   filebase30[,5]<-as.numeric(filebase30[,5])+as.numeric(bulkfile2[[i]][,5])
+    }
+lenb<-dim(filebase30)[1]
+rowb<-rownames(filebase30)
+for (i in 1:lenb){
+    if (filebase30[i,1]!="0") next
+    filebase30[i,1]<-strsplit(rowb[i],split=";")[[1]][1]
+    filebase30[i,2]<-strsplit(rowb[i],split=";")[[1]][2]   
+   }
+result_rules<-filebase30
+rule_result<-result_rules[,3]
+result_arules2<-result_rules[which(rule_result!="NaN"),]
+rule_result2<-result_arules2[,3]
+result_arules2<-result_arules2[which(rule_result2!="0"),]
+confi<-as.numeric(result_arules2[,3])
+lconfi<- quantile(confi,probs= seq(0.05,1,by=0.05))[13]
+result_arules3<-result_arules2[which(confi>=lconfi),]   
+support<-as.numeric(result_arules3[,4])
+lsupport<-quantile(support)[2]
+result_arules3<-result_arules3[which(support>=lsupport),]  
+fwrite(result_arules3,"Arules_allomics_adding.csv",row.names=FALSE)     
+  
+   ##Using correlation on filtering data
+f<-read.csv(FILE,check.names=TRUE)
+result_arules3<-read.csv("Arules_allomics_adding.csv")
+len31<-dim(result_arules3)[1]
+num31<-dim(result_arules3)[2]
+rule31<-result_arules3[,1]
+rule32<-result_arules3[,2]
+nms<-rownames(f)
+lenf<-dim(f)[1]
+gene<-f[,1]
+cor31<-rep(0,len31)
+for (i in 1:len31) {
+   k1<-which(gene==rule31[i])
+   k2<-which(gene==rule32[i])
+   lenk1<-length(k1)
+   lenk2<-length(k2)
+   if (lenk1*lenk2==0) next
+   count1<-f[k1,2:num31]
+   count2<-f[k2,2:num31]
+   cor31[i]<-cor(as.numeric(count1),as.numeric(count2))
+  }
+result_arules3$cor31<-cor31
+result_arules31<-result_arules3[which(cor31>0.75),]    ##set manually here (0.75) according to the output or user requirements
+#result_arules32<-result_arules3[which(cor31<(-0.6)),]  ##if requiring negative correlation
+#result_arules31<-rbind(result_arules31,result_arules32)
+fwrite(result_arules32,"Arules_allomics_adding_filtered.csv",row.names=FALSE)
+ 
+   ##Conversion into rules matrix
+result_arules3<-read.csv("Arules_allomics_adding_filtered.csv")
+rule31<-as.character(result_arules3[,1])
+rule32<-as.character(result_arules3[,2])
+urule31<-unique(rule31)
+urule32<-unique(rule32)
+len31<-length(urule31)
+len32<-length(urule32)
+matrix_rules<-matrix(0,len31,len32)
+rownames(matrix_rules)<-urule31
+colnames(matrix_rules)<-urule32
+lenc<-dim(result_arules3)[1]
+for (i in 1:lenc){
+     ra1<-result_arules3[i,1]
+     ra2<-result_arules3[i,2]
+     matrix_rules[ra1,ra2]<-result_arules3[i,3]
+     }
+write.csv(matrix_rules,"Arules_allomics_rules_matrix.csv")
+
+   ##Migration to User Specific terms (Here taking "Castration Resistance" as example)
+TERM<-"Castration_Resistance"       ##input manually here
+matrix_rules<-read.csv("Arules_allomics_rules_matrix.csv")
+matrix_rules2<-matrix_rules[,-1]
+genem1<-as.character(matrix_rules[,1])
+matrix_rules2<-apply(matrix_rules2,2,as.numeric)
+rownames(matrix_rules2)<-genem1
+codata<-read.csv("Genes_PC_Castration.csv")   ##co-occurrence file for genes and the required term and then normalized
+codata2<-codata[,-1]
+codata2<-as.matrix(codata2)
+colnames(codata2)<-TERM
+geneco<-as.character(codata[,1])
+codata2<-apply(codata2,2,as.numeric)
+rownames(codata2)<-geneco
+genem2<-colnames(matrix_rules2)
+intergene<-intersect(genem2,geneco)
+matrix_rules3<-matrix_rules2[,intergene]
+codata3<-codata2[intergene,]
+codata3<-as.matrix(codata3)
+colnames(codata3)<-TERM
+matrix4<-matrix_rules3 %*% codata3
+write.csv(matrix4,"Migration_version1.csv")
+
+matrix_rules<-read.csv("Arules_allomics_rules_matrix.csv")
+matrix_rules2<-matrix_rules[,-1]
+genem1<-as.character(matrix_rules[,1])
+matrix_rules2<-apply(matrix_rules2,2,as.numeric)
+rownames(matrix_rules2)<-genem1
+rule31<-rownames(matrix_rules2)
+rule32<-colnames(matrix_rules2)
+rule33<-union(rule31,rule32)
+data2<-fread("Arules_all_samples_addsc_normalized.csv")   ##Merged file for all transcriptome data and normalized afterwards
+#data2<-fread("Data_normalized.csv")   ##For single file
+data2<-as.matrix(data2)
+gene2<-as.character(data2[,1])
+sss<-which(gene2 %in% rule33)
+#codata<-read.csv("Genes_PC_Castration.csv")
+codata<-read.csv("PCOS_tm_folliculogenesis.csv")
+numcol<-dim(codata)[2]
+col3<-colnames(codata)
+      mm<-2
+       ris3<-codata[,c(1,mm)]
+       for (kkk in 1000:1){
+            lenkkk<-length(which(ris3[,2]>=kkk))
+            if (lenkkk>=120) break
+            }      
+      ris30<-ris3[which(ris3[,2]>=kkk),]   
+      len2<-length(gene2)
+      marker_gene<-as.character(ris30[,1])
+      s1<-data2[which(gene2 %in% marker_gene),]
+      s10<-as.matrix(s1[,-1])
+      rows10<-as.character(s1[,1])
+      s2<-data2[setdiff(sss,which(gene2 %in% marker_gene)),]
+      s20<-as.matrix(s2[,-1])
+      rows20<-as.character(s2[,1])
+     s10t<-as.matrix(s10)
+     s20t<-t(s20)
+     s11t<-apply(s10t,2,as.numeric)
+     s21t<-apply(s20t,2,as.numeric)
+      ss<-s11t %*% s21t
+     rownames(ss)<-rows10
+    colnames(ss)<-rows20
+    ss2<-t(ss)
+    ss2[is.na(ss2)]<-0
+    ##set filtering rules according to the data
+    lens2<-dim(ss2)[1]
+    nums2<-dim(ss2)[2]
+    counts2<-rep(0,lens2)
+    for (i in 1:lens2){
+        for (j in 1:nums2){
+         tempp<-quantile(ss2[,j])[4]
+         if (ss2[i,j]>=tempp) counts2[i]<-counts2[i]+1 
+           }
+        }
+   ss2<-as.data.frame(ss2)
+    ss2$count_quantile4<-counts2
+    ss30<-ss2[which(counts2==max(counts2)),]
+    FILEOUT<-paste("Arules",col3[mm],"migration.csv",sep="_")
+    write.csv(ss30,FILEOUT)
+
+data1<-read.csv(FILEOUT)
+data00<-read.csv("Migration_version1.csv")
+data11<-as.character(data1[,1])
+data02<-as.numeric(data00[,2])
+data41<-data00[which(data02>quantile(data02)[4]),]
+data1a<-data1[which(data11 %in% data41[,1]),]
+write.csv(data1a,"Arules_migration_filter.csv",row.names=FALSE)
+
+  ##Add filtering for differential analysis -- if necessary-- can be adjusted by users
+gdata<-read.csv("Data_processed.csv")  ##readin the normalized file with fold change 
+gene1a<-data1a[,1]
+fold0<-as.numeric(gdata$fold_CR_Nm)  ##input the name of fold change column here
+gdata2<-gdata[which(fold0>1),]
+gdata20<-as.character(gdata2[,1])
+write.csv(data1e,"Arules_migration_fold_filter.csv",row.names=FALSE)
+
+
+  ##Filtering drugs for users required terms
+result_arules3<-read.csv("Arules_allomics_adding_filtered.csv")
+data1a<-read.csv("Arules_migration_filter.csv")
+gene_list<-data1a[,1]
+len1<-length(gene_list)
+bulk<-list()
+bulk[len1]<-0
+rule1<-as.character(result_arules3[,1])
+rule2<-as.character(result_arules3[,2])
+for (i in 1:len1){
+     gene<-gene_list[i]
+     k2<-rule2[which(rule1==gene)]
+     k1<-rule1[which(rule2==gene)]
+     k12<-union(k1,k2)
+     lenk<-length(k12)
+      if (lenk>100){
+      scorek<-rep(0,lenk)
+       for (j in 1:lenk){
+         ii<-intersect(which(gene==rule1),which(k12[j]==rule2))
+         jj<-intersect(which(gene==rule2),which(k12[j]==rule1))
+         if (length(ii)>0 & length(jj)>0) 
+             scorek[j]<-mean(result_arules3[ii,3],result_arules3[jj,3])+mean(result_arules3[ii,5],result_arules3[jj,5])*2
+         else if (length(ii)==0) scorek[j]<-result_arules3[jj,3]+result_arules3[jj,5]*2
+         else if (length(jj)==0) scorek[j]<-result_arules3[ii,3]+result_arules3[ii,5]*2
+         }
+      for (ttt in 1:100){
+            k120<-k12[which(scorek>quantile(scorek,probs= seq(0.01,1,by=0.01))[ttt])]
+            lenk120<-length(k120)
+            if (lenk120<=100) break 
+            }
+         k12<-k120
+         }
+      bulk[[i]]<-k12
+    }
+
+library("data.table")
+drug_data<-fread("Gene_drug_interactions.tsv")    ##Downloaded gene-drug interaction files 
+drug_data<-as.matrix(drug_data)
+drug_gene<-as.character(drug_data[,1])
+drug_score<-as.numeric(drug_data[,10])
+drug<-as.character(drug_data[,8])
+drug_original<-""
+freq<-0
+tt<-1
+for (i in 1:len1){
+    gene<-bulk[[i]]
+    leng<-length(gene)
+    for (j in 1:leng){
+         jj<-which(gene[j]==drug_gene)
+         if (length(jj)==0) next
+         drug0<-unique(drug[jj])
+         drug11<-intersect(drug0,drug_original)
+         drug12<-setdiff(drug0,drug11)
+         freq[which(drug_original %in% drug11)]<- freq[which(drug_original %in% drug11)]+1
+         drug_original<-c(drug_original,drug12)
+         freq<-c(freq,rep(1,length(drug12)))
+         }
+   }
+drug_freq<-cbind(drug_original,freq)
+colnames(drug_freq)<-c("Drug","Frequency")
+drug_freq<-drug_freq[which(drug_original!=""),]
+write.csv(drug_freq,"Drugs_Frequency.csv",row.names=FALSE)
+
+drugs<-read.csv("Drugs_Frequency.csv")
+drug00<-as.character(drugs[,1])
+freq00<-as.numeric(drugs[,2])
+drug01<-drug00[which(freq00>1)]    ##Set manually according to output (1)
+gene01<-unique(unlist(bulk))
+gene_all<-union(gene01,gene_list)
+drug_data2<-drug_data[intersect(which(drug_gene %in% gene_all),which(drug %in% drug01)),]
+drug_data3<-drug_data2[,c(1,8,10)]
+drug_data3<-unique(drug_data3)
+chem3<-as.character(drug_data3[,2])
+len3<-dim(drug_data3)[1]
+mark3<-rep(0,len3)
+for (i in 1:len3){
+    if (substr(chem3[i],1,6)=="CHEMBL") mark3[i]<-1
+   }
+drug_data30<-drug_data3[which(mark3==0),]
+drug_score30<-as.numeric(drug_data30[,3])
+drug_data30<-drug_data30[which(drug_score30>1),]
+write.csv(drug_data30,"Drugs_sorted_new.csv",row.names=FALSE)  
+ugene<-unique(drug_data30[,1])
+udrug<-unique(drug_data30[,2])
+leng<-length(ugene)
+lend<-length(udrug)
+matrix_dg<-matrix(0,lend,leng)
+rownames(matrix_dg)<-udrug
+colnames(matrix_dg)<-ugene
+matrix_dd<-matrix(0,lend,lend)
+rownames(matrix_dd)<-udrug
+colnames(matrix_dd)<-udrug
+write.csv(matrix_dd,"Matrix_dd.csv")
+write.csv(matrix_dg,"Matrix_dg.csv")
+
+##Next using other tools to calculate co-occurrence counts for "Matrix_dd.csv" and "Matrix_dg.csv"
+#and save the output file into "Matrix_dd.csv" and "Matrix_dg.csv"
+
+#Continue drug calculating
+  #D-G Interaction Matrix Generation
+matrix_dg<-read.csv("Matrix_dg.csv")
+row1<-matrix_dg[,1]
+matrix_dg<-matrix_dg[,-1]
+matrix_dg<-apply(matrix_dg,2,as.numeric)
+rownames(matrix_dg)<-row1
+   ##D-D Interaction Matrix Generation
+matrix_dd<-read.csv("Matrix_dd.csv")
+row1<-matrix_dd[,1]
+matrix_dd<-matrix_dd[,-1]
+matrix_dd<-apply(matrix_dd,2,as.numeric)
+rownames(matrix_dd)<-row1
+rowdd<-rowSums(matrix_dd)
+kdd<-which(rowdd!=0)
+matrix_dd<-matrix_dd[kdd,kdd]
+matrix_dg<-matrix_dg[kdd,]
+    ##G-Castration Rules Matrix Generation (G-G rule * G-C co-occurrence = G-C rule)
+genedg<-colnames(matrix_dg)
+ruledata<-read.csv("Arules_allomics_rules_matrix.csv")
+ruledata2<-ruledata[,-1]
+row3<-as.character(ruledata[,1])
+rownames(ruledata2)<-row3
+col3<-colnames(ruledata)
+pcdata<-read.csv("Genes_PC_Castration.csv")
+pcdata<-unique(pcdata)
+rownames(pcdata)<-as.character(pcdata[,1])
+pc2<-as.numeric(pcdata[,2])
+pcdata2<-pcdata[which(pc2>0),]
+pcd2<-as.character(pcdata2[,1])
+genedg2<-intersect(genedg,row3)
+pcd3<-intersect(pcd2,col3)
+ruledata3<-ruledata2[genedg2,pcd3]
+pcdata3<-pcdata[pcd3,]
+pcdata4<-as.matrix(pcdata3[,2])
+ruledata4<-apply(ruledata3,2,as.numeric)
+         #convert pcdata4 to match ruledata4
+matrix5<-pcdata4
+rule5<-ruledata4
+rule50<-rule5[which(rule5!=0)]
+quantr5<-quantile(rule50,probs=seq(0,1,0.01))
+max5<-max(matrix5)
+rul5<-max(rule5)
+sss0<-Inf
+ITER<-100000000
+for (ss in 1:ITER){
+    switch<-sample(0:3,1)
+    if (switch==0) {
+         if (max5==0) next
+         if (rul5>=max5) k1<-runif(1,1,rul5/max5)
+         if (rul5<max5) k1<-runif(1,0,rul5/max5)
+         matrix61<-matrix5*k1
+         }
+    if (switch==1) {
+         kk<-runif(1,1.1,30)
+         matrix6<-log(matrix5)/log(kk)
+         max6<-max(matrix6)
+         if (max6==0) next
+         if (rul5>=max6) k1<-runif(1,1,rul5/max6)
+         if (rul5<max6) k1<-runif(1,0,rul5/max6)
+         matrix61<-matrix6*k1
+         matrix61[which(matrix61==-Inf)]<-0
+         }
+    if (switch==2){
+        kk<-runif(1,0.01,30)
+        matrix6<-matrix5^kk
+        max6<-max(matrix6)
+       if (max6==Inf) next
+       if (max6==0) next
+        if (rul5>=max6) k1<-runif(1,1,rul5/max6)
+        if (rul5<max6) k1<-runif(1,0,rul5/max6)
+        matrix61<-matrix6*k1
+        }
+    if (switch==3){
+       kk<-runif(1,1,10)
+       matrix6<-kk^matrix5
+        max6<-max(matrix6)
+        if (max6==Inf) next
+        if (max6==0) next
+        if (rul5>=max6) k1<-runif(1,1,rul5/max6)
+        if (rul5<max6) k1<-runif(1,0,rul5/max6)
+        matrix61<-matrix6*k1
+        }    
+    matrix50<-matrix61[which(matrix61!=0)]
+    quantm5<-quantile(matrix50,probs=seq(0,1,0.01))
+    mean1<-runif(1,0,rul5)
+    mean2<-runif(1,0,max(matrix61))
+    quantr6<-quantr5+mean2
+    quantm6<-quantm5+mean1
+    sss<-sum((quantr6-quantm6)^2)
+    if (sss<sss0) {
+         sss0<-sss
+         record_matrix6<-matrix61+mean1
+         record_matrix6[which(matrix61==0)]<-0
+         mean20<-mean2   
+         }
+    }
+record_matrix<-record_matrix6
+rule7<-rule5+mean20
+rule7[which(rule5==0)]<-0
+  ##
+ruledata4<-rule7
+pc_data4<-record_matrix
+rule500<-ruledata4 %*% pcdata4
+rownames(rule500)<-genedg2
+colnames(rule500)<-TERM
+ ##Drug Transmerging Calculation
+      #convert co-occurred numbers (aa) according to rule500 (rules)
+matrix5<-cbind(matrix_dd,matrix_dg)
+numdd<-dim(matrix_dd)[2]
+num5<-dim(matrix5)[2]
+rule5<-rule500
+rule50<-rule5[which(rule5!=0)]
+quantr5<-quantile(rule50,probs=seq(0,1,0.01))
+max5<-max(matrix5)
+rul5<-max(rule5)
+sss0<-Inf
+ITER<-100000000
+for (ss in 1:ITER){
+    switch<-sample(0:3,1)
+    if (switch==0) {
+         if (max5==0) next
+         if (rul5>=max5) k1<-runif(1,1,rul5/max5)
+         if (rul5<max5) k1<-runif(1,0,rul5/max5)
+         matrix61<-matrix5*k1
+         }
+    if (switch==1) {
+         kk<-runif(1,1.1,30)
+         matrix6<-log(matrix5)/log(kk)
+         max6<-max(matrix6)
+         if (max6==0) next
+         if (rul5>=max6) k1<-runif(1,1,rul5/max6)
+         if (rul5<max6) k1<-runif(1,0,rul5/max6)
+         matrix61<-matrix6*k1
+         matrix61[which(matrix61==-Inf)]<-0
+         }
+    if (switch==2){
+        kk<-runif(1,0.01,30)
+        matrix6<-matrix5^kk
+        max6<-max(matrix6)
+        if (max6==Inf) next 
+        if (max6==0) next
+        if (rul5>=max6) k1<-runif(1,1,rul5/max6)
+        if (rul5<max6) k1<-runif(1,0,rul5/max6)
+        matrix61<-matrix6*k1
+        }
+    if (switch==3){
+       kk<-runif(1,1,10)
+       matrix6<-kk^matrix5
+        max6<-max(matrix6)
+        if (max6==Inf) next
+        if (max6==0) next
+        if (rul5>=max6) k1<-runif(1,1,rul5/max6)
+        if (rul5<max6) k1<-runif(1,0,rul5/max6)
+        matrix61<-matrix6*k1
+        }    
+    matrix50<-matrix61[which(matrix61!=0)]
+    quantm5<-quantile(matrix50,probs=seq(0,1,0.01))
+    mean1<-runif(1,0,rul5)
+    mean2<-runif(1,0,max(matrix61))
+    quantr6<-quantr5+mean2
+    quantm6<-quantm5+mean1
+    sss<-sum((quantr6-quantm6)^2)
+    if (sss<sss0) {
+         sss0<-sss
+         record_matrix6<-matrix61+mean1
+         record_matrix6[which(matrix61==0)]<-0
+         mean20<-mean2   
+         }
+    }
+record_matrix<-record_matrix6
+rule7<-rule5+mean20
+rule7[which(rule5==0)]<-0
+     ##
+rule500<-rule7
+matrix5<-record_matrix
+matrix_dd<-matrix5[,1:numdd]   
+matrix_dg<-matrix5[,(numdd+1):num5]
+    ##If reporting errors for solve(matrix_dd), using the next codes
+len1<-dim(matrix_dd)[1]
+matrix_dd<-matrix_dd+matrix(runif(len1*len1,-0.00001,0.00001),nrow=len1)
+    ##Data multiplex
+aa<-solve(matrix_dd) %*% matrix_dg
+ab<-aa %*% rule500
+write.csv(ab,"Drug_migration_final.csv")
+    ####
+
+
+
+
+
+
+
+
+
